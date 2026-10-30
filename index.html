@@ -964,7 +964,7 @@ G.KDT = {kdtXML: kdtXML, leerKDT: leerKDT, gaps: function(){ var g = GAPS; GAPS 
   function filasDilegno(T, o) {
     o = o || {};
     return T.piezas.map(p => [p.cant, p.largo, p.ancho, String(p.des || '').slice(0, o.maxDesc || 50),
-      (p.rota == null ? !!o.rota : p.rota) ? 1 : 0,
+      (o.rota || p.rota) ? 1 : 0,   // tildado "pueden girar" en la placa -> todas giran; si no, lo que diga cada pieza
       ...(o.sinCantos ? [0, 0, 0, 0] : [p.cantos.l1.k, p.cantos.l2.k, p.cantos.a1.k, p.cantos.a2.k])]);
   }
   async function excelDilegno(ExcelJS, T, o) {
@@ -1027,7 +1027,25 @@ G.KDT = {kdtXML: kdtXML, leerKDT: leerKDT, gaps: function(){ var g = GAPS; GAPS 
     return wb.xlsx.writeBuffer();
   }
 
-  const api = { parse, filasDilegno, txtDilegno, excelDilegno, excelImprimir, DIL_HEAD, PRINT_HEAD, edge, designacion };
+  /* Tablero armado desde las filas de un proyecto del optimizador (sin CSV)
+     filas: [{cant,largo,ancho,desc,girar,cantos:{sup,inf,izq,der}}] -> mismo formato que parse() */
+  function tableroDesdeFilas(filas, o) {
+    o = o || {};
+    const ek = k => (k = parseInt(k, 10) || 0) ? { k, t: String(k) } : { k: 0, t: '' };
+    const T = { material: o.material || 'Sin material', nombre: o.nombre || o.material || 'Sin material', esp: o.esp || 0, rota: false,
+      piezas: [], nPiezas: 0, m2: 0, cantoM: { 1: 0, 2: 0 } };
+    (filas || []).forEach(r => {
+      const cant = parseInt(r.cant, 10), largo = mm(r.largo), ancho = mm(r.ancho);
+      if (!(cant > 0) || !largo || !ancho) return;
+      const c = r.cantos || {}, e = [ek(c.sup), ek(c.inf), ek(c.izq), ek(c.der)];
+      T.piezas.push({ cant, largo, ancho, des: String(r.desc || ''), cantos: { l1: e[0], l2: e[1], a1: e[2], a2: e[3] }, rota: !!r.girar });
+      T.nPiezas += cant; T.m2 += largo * ancho * cant / 1e6;
+      [[e[0], largo], [e[1], largo], [e[2], ancho], [e[3], ancho]].forEach(([x, len]) => { if (x.k) T.cantoM[x.k] += len * cant / 1000; });
+    });
+    return T;
+  }
+
+  const api = { tableroDesdeFilas, parse, filasDilegno, txtDilegno, excelDilegno, excelImprimir, DIL_HEAD, PRINT_HEAD, edge, designacion };
   root.PedidoOCL = api;
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
@@ -1247,9 +1265,15 @@ function oclDlg(){
   const d=modal(`${H('Pedido de corte desde OpenCutList')}
    <p class="note" style="margin:0">Elegí el CSV completo que exporta OpenCutList. Se toman solo los <b>Tableros</b>, separados por material: Dilegno carga un tipo de tablero por vez, así que sale un archivo por placa.</p>
    <label class="ocdrop" id="oc-drop" for="oc-f"><input type="file" id="oc-f" accept=".csv,.txt" hidden><b>Arrastrá acá el CSV de OpenCutList</b><span>o hacé clic para elegirlo</span><span class="note" id="oc-arch"></span></label>
+   <div class="row" id="oc-proy-row" style="justify-content:space-between" hidden><span class="note" id="oc-proy-t"></span><button class="btn sm" id="oc-proy">Usar el proyecto abierto</button></div>
    <div id="oc-body"></div>`,'');
-  const draw=()=>{const b=d.q('#oc-body');if(!OCLP){b.innerHTML='';return}
-    const P=OCLP;d.q('#oc-arch').textContent=P.archivo;
+  const hayProy=()=>S.rows.some(r=>num(r.cant)>0)&&!S.example;
+  const syncProy=()=>{const r=d.q('#oc-proy-row');r.hidden=!hayProy();if(r.hidden)return;
+    const de=OCLP&&OCLP.deProyecto;d.q('#oc-proy-t').innerHTML=de?`Mostrando el proyecto abierto <b>${esc(S.proyecto||'sin nombre')}</b>${S.ocl?' con todas las placas de su CSV':''}. Para otro pedido, arrastrá un CSV.`:`Proyecto abierto: <b>${esc(S.proyecto||'sin nombre')}</b>`;
+    d.q('#oc-proy').hidden=!!de};
+  d.q('#oc-proy').onclick=()=>{OCLP=pedidoDesdeProyecto();draw()};
+  const draw=()=>{syncProy();const b=d.q('#oc-body');if(!OCLP){b.innerHTML='';return}
+    const P=OCLP;d.q('#oc-arch').textContent=P.deProyecto?'':P.archivo;
     b.innerHTML=`<div class="field"><label for="oc-ped">Nombre del pedido</label><input type="text" id="oc-ped" value="${esc(P.pedido)}" maxlength="60"></div>
      <p class="note" style="margin:0">El <b>archivo para Dilegno</b> es un .txt separado por tabuladores, que es lo que lee su botón <b>Importar</b>: elegís la placa en Material, tocás Importar y lo subís. “Ver en Excel” baja lo mismo en .xlsx para revisarlo.</p>
      <fieldset><legend>Cantos en el archivo para Dilegno</legend><div class="checks">
@@ -1260,7 +1284,7 @@ function oclDlg(){
        <div class="row" style="justify-content:space-between"><b>${esc(T.material)}${T.esp?` · ${fmt(T.esp,T.esp%1?1:0)} mm`:''}</b>
         <span class="note">${T.piezas.length} medidas · ${T.nPiezas} piezas · ${fmt(T.m2,2)} m²${T.cantoM[1]||T.cantoM[2]?` · canto ${fmt(T.cantoM[1]+T.cantoM[2],1)} m`:''}</span></div>
        <div class="row"><label class="note" for="oc-n${i}" style="min-width:150px">Nombre del material</label><input type="text" id="oc-n${i}" data-n="${i}" value="${esc(T.nombre)}" style="flex:1;min-width:180px" placeholder="Ej: MDF Roble Kendal Natural 18"></div>
-       <div class="row" style="justify-content:space-between"><label class="note"><input type="checkbox" data-r="${i}" ${T.rota?'checked':''}> Las piezas pueden girar (placa sin veta)</label>
+       <div class="row" style="justify-content:space-between"><label class="note"><input type="checkbox" data-r="${i}" ${T.rota?'checked':''}> Todas las piezas pueden girar (placa sin veta)</label>
         <div class="row"><button class="btn sm" data-dil="${i}">Archivo para Dilegno</button><button class="btn sm" data-xl="${i}">Ver en Excel</button><button class="btn sm" data-opt="${i}">Cargar en el optimizador</button></div></div></div>`).join('')}</div>
      <div class="row" style="justify-content:flex-end"><button class="btn" id="oc-todos">${P.tableros.length>1?`Los ${P.tableros.length} archivos para Dilegno`:'Archivo para Dilegno'}</button><button class="btn primary" id="oc-imp">Excel para imprimir (A4)</button></div>
      ${Object.keys(P.otros).length?`<p class="note" style="margin:0">No entran en el pedido: ${Object.entries(P.otros).map(([k,v])=>`${v} filas de ${esc(k)}`).join(' · ')}.</p>`:''}
@@ -1284,12 +1308,21 @@ function oclDlg(){
     fr.onload=()=>{let R;try{R=PedidoOCL.parse(String(fr.result),f.name)}catch(er){toast(er.message||'No se pudo leer el CSV');return}
       R.pedido=f.name.replace(/\.(csv|txt)$/i,'');R.sinCantos=false;R.tableros.forEach(T=>{T.nombre=T.material;T.rota=false});OCLP=R;draw()};
     fr.readAsText(f,'utf-8')}
+  if(hayProy()&&(S.id||S.ocl))OCLP=pedidoDesdeProyecto();
   draw()}
+/* copia liviana del pedido OCL para guardarla con el proyecto (tIdx = placa que se cargó en el optimizador) */
+function oclSnap(P,tIdx){return {pedido:P.pedido,archivo:P.archivo,sinCantos:!!P.sinCantos,otros:P.otros||{},tIdx,
+  tableros:P.tableros.map(T=>({material:T.material,nombre:T.nombre,esp:T.esp,rota:!!T.rota,piezas:T.piezas,nPiezas:T.nPiezas,m2:T.m2,cantoM:T.cantoM}))}}
+/* arma el pedido desde el proyecto abierto: la placa del optimizador sale de la lista actual; las demás, del CSV guardado */
+function pedidoDesdeProyecto(){const actual=(base)=>{const T=PedidoOCL.tableroDesdeFilas(S.rows,{material:base?base.material:S.mat.desc,nombre:base?base.nombre:S.mat.desc,esp:base?base.esp:S.mat.esp});if(base)T.rota=!!base.rota;return T};
+  const O=S.ocl?JSON.parse(JSON.stringify(S.ocl)):null;
+  let tableros;if(O&&O.tableros&&O.tableros[O.tIdx]){tableros=O.tableros;tableros[O.tIdx]=actual(O.tableros[O.tIdx])}else tableros=[actual(null)];
+  return {deProyecto:true,archivo:'',pedido:(O&&O.pedido)||S.proyecto||'Pedido',sinCantos:O?!!O.sinCantos:false,otros:(O&&O.otros)||{},tableros}}
 $('b-ocl').onclick=()=>oclDlg();
 async function bajarDilegno(lista,excel){
   if(excel&&!window.ExcelJS){toast('No se pudo cargar el generador de Excel. Recargá la página.');return}
-  const P=OCLP,o={sinCantos:P.sinCantos,maxDesc:CFG.maxDesc||50};
-  for(const T of lista){const nom=fsafe(`${P.pedido} - ${T.nombre||T.material} - Dilegno${P.sinCantos?' SIN CANTOS':''}`);
+  const P=OCLP;
+  for(const T of lista){const o={sinCantos:P.sinCantos,maxDesc:CFG.maxDesc||50,rota:!!T.rota};const nom=fsafe(`${P.pedido} - ${T.nombre||T.material} - Dilegno${P.sinCantos?' SIN CANTOS':''}`);
     if(excel)await offer(nom+'.xlsx',xbuf(await PedidoOCL.excelDilegno(ExcelJS,T,o)));
     else await offer(nom+'.txt',PedidoOCL.txtDilegno(T,o))}}
 async function bajarImprimir(){
@@ -1298,9 +1331,10 @@ async function bajarImprimir(){
   const b=await PedidoOCL.excelImprimir(ExcelJS,P.tableros,{titulo:P.pedido,fecha:hoy});
   await offer(fsafe(`${P.pedido} - para imprimir`)+'.xlsx',xbuf(b))}
 function cargarTablero(T){
-  const rows=T.piezas.map(p=>({cant:p.cant,largo:p.largo,ancho:p.ancho,desc:String(p.des||'').slice(0,CFG.maxDesc||50),girar:p.rota==null?!!T.rota:p.rota,
+  const rows=T.piezas.map(p=>({cant:p.cant,largo:p.largo,ancho:p.ancho,desc:String(p.des||'').slice(0,CFG.maxDesc||50),girar:!!T.rota||!!p.rota,
     cantos:{sup:p.cantos.l1.k,inf:p.cantos.l2.k,izq:p.cantos.a1.k,der:p.cantos.a2.k}}));
-  const go=()=>{S.rows=rows;S.proyecto=fsafe(OCLP.pedido+' '+(T.nombre||T.material)).replace(/[^0-9a-zA-Z _*ñÑáéíóúÁÉÍÓÚüÜ.,()\-]/g,'').slice(0,50);S.example=false;S.estado='borrador';S.id=null;padRows();renderHead();renderRows();save();show('editor');
+  const ocl=oclSnap(OCLP,OCLP.tableros.indexOf(T));
+  const go=()=>{S.rows=rows;S.ocl=ocl;S.proyecto=fsafe(OCLP.pedido+' '+(T.nombre||T.material)).replace(/[^0-9a-zA-Z _*ñÑáéíóúÁÉÍÓÚüÜ.,()\-]/g,'').slice(0,50);S.example=false;S.estado='borrador';S.id=null;padRows();renderHead();renderRows();save();show('editor');
     toast(`${rows.length} medidas de ${T.nombre||T.material} cargadas. Elegí la placa en Material y optimizá.`)};
   if(S.rows.some(r=>num(r.cant)>0)&&!S.example)confirmDlg('Reemplazar la lista','La lista de piezas actual se reemplaza por la de '+esc(T.nombre||T.material)+'. Si la querés conservar, guardala antes en Mis proyectos.','Reemplazar',go);else go()}
 /* ---- KDT PreSize: XML de cortes (formato Lepton) + etiquetas .EMF por item ---- */
@@ -1335,12 +1369,12 @@ const projLocal=()=>LS.get('mueler_proyectos2',[]);
 function projSummary(){const pcs=S.rows.filter(r=>num(r.cant)>0);const R=LAST;
   return {nombre:S.proyecto||'(sin nombre)',cliente:S.cliente||'',estado:S.estado,material:S.mat.desc,matCode:S.mat.code,
   piezas:pcs.reduce((s,r)=>s+num(r.cant),0),placas:R?R.nPlacas:null,m2:R?+R.m2Cortado.toFixed(3):null,ml1:R?R.tapacanto.m1:null,ml2:R?R.tapacanto.m2:null,total:R?+budget(R).total.toFixed(2):null,
-  fecha:Date.now(),data:JSON.stringify({proyecto:S.proyecto,cliente:S.cliente,mat:S.mat,t1:S.t1,t2:S.t2,rows:pcs,recortes:S.recortes,envio:S.envio||null})}}
+  fecha:Date.now(),data:JSON.stringify({proyecto:S.proyecto,cliente:S.cliente,mat:S.mat,t1:S.t1,t2:S.t2,rows:pcs,recortes:S.recortes,envio:S.envio||null,ocl:S.ocl||null})}}
 async function saveProject(estado){if(estado)S.estado=estado;else if(S.estado==='borrador')S.estado='grabado';const doc=projSummary();
   if(DB){try{if(!S.id||String(S.id).startsWith('l'))S.id='p'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);if(USER){const id=await USER.id();if(id)doc.autor=id}
       await DB.collection('proyectos').doc(S.id).set(doc);renderHead();save();return true}catch(e){toast('No se pudo guardar en la nube ('+((e&&e.code)||'error')+'); queda en este navegador')}}
   const a=projLocal();if(!S.id)S.id='l'+Date.now().toString(36);const ix=a.findIndex(p=>p.id===S.id);const it=Object.assign({id:S.id},doc);if(ix>=0)a[ix]=it;else a.unshift(it);LS.set('mueler_proyectos2',a);renderHead();save();return true}
-function openProject(p){const d=JSON.parse(p.data);S={id:p.id,estado:p.estado||'grabado',example:false,proyecto:d.proyecto||'',cliente:d.cliente||'',mat:matByCode(d.mat&&d.mat.code)||d.mat,t1:d.t1,t2:d.t2,rows:d.rows||[],recortes:d.recortes||[],envio:d.envio||null};
+function openProject(p){const d=JSON.parse(p.data);S={id:p.id,estado:p.estado||'grabado',example:false,proyecto:d.proyecto||'',cliente:d.cliente||'',mat:matByCode(d.mat&&d.mat.code)||d.mat,t1:d.t1,t2:d.t2,rows:d.rows||[],recortes:d.recortes||[],envio:d.envio||null,ocl:d.ocl||null};
   padRows();renderHead();renderRows();save();runOptimize(true);show('editor');toast('Proyecto abierto: '+(S.proyecto||'sin nombre'))}
 async function deleteProject(p){if(DB&&!String(p.id).startsWith('l')){try{await DB.collection('proyectos').doc(p.id).delete()}catch(e){toast('No se pudo borrar');return}}
   else LS.set('mueler_proyectos2',projLocal().filter(x=>x.id!==p.id));
