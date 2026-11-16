@@ -166,6 +166,10 @@ legend{font:700 13px var(--f-display);padding:0 6px}
 .doc pre{background:var(--panel2);padding:12px;border-radius:6px;overflow-x:auto;max-width:100%}
 .doc pre code{background:none;padding:0}
 .doc hr{border:0;border-top:1px solid var(--line);margin:24px 0}
+.hojabox{border-top:1px solid var(--line);padding-top:10px}.hojabox summary{cursor:pointer;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.hojal{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:4px;font-size:13.5px}
+.hojal .hi{color:var(--muted);font-size:12.5px}.hojal label{display:flex;gap:8px;align-items:flex-start;cursor:pointer}.hojal input{margin-top:3px;flex:none}
+.hojal .t-sobrante,.hojal .t-descarte{color:var(--muted)}.hojal .t-parte{font-weight:600}.hojal input:checked+span{text-decoration:line-through;opacity:.55}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 
@@ -456,6 +460,176 @@ legend{font:700 13px var(--f-display);padding:0 6px}
   }
   root.CutOptimizer = { optimize, FRACS };
   if (typeof module !== 'undefined') module.exports = { optimize, FRACS };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+<script>/* Hoja de corte para la escuadradora - Mueler
+   A partir de una placa ya optimizada (piezas ubicadas) arma el árbol de cortes en guillotina:
+   tiras (A, B, C…) → partes de cada tira (A1, A2…) → partes de cada parte (A1a, A1b…) …
+   Cada paso dice en qué sentido se corta y la medida del tope (lo que se separa, sin la sierra). */
+(function (G) {
+'use strict';
+var TOL = 0.6;
+
+function letra(i) { var s = ''; i++; while (i > 0) { var r = (i - 1) % 26; s = String.fromCharCode(65 + r) + s; i = Math.floor((i - 1) / 26); } return s; }
+function etiqueta(padre, i, nivel) {
+  if (nivel === 1) return letra(i);
+  return padre + (nivel % 2 === 0 ? String(i + 1) : String.fromCharCode(97 + (i % 26)));
+}
+function n1(v) { var r = Math.round(v * 10) / 10; return String(r).replace('.', ','); }
+
+function segs(list, ax) {
+  var iv = list.map(function (p) { return ax === 'y' ? { s: p.y, e: p.y + p.h, p: p } : { s: p.x, e: p.x + p.w, p: p }; })
+    .sort(function (a, b) { return a.s - b.s || a.e - b.e; });
+  var out = [];
+  iv.forEach(function (it) {
+    var l = out[out.length - 1];
+    if (l && it.s < l.e - TOL) { l.e = Math.max(l.e, it.e); l.items.push(it.p); }
+    else out.push({ s: it.s, e: it.e, items: [it.p] });
+  });
+  return out;
+}
+
+/* ax = 'y': los cortes son paralelos al largo de la placa (separan franjas en y)
+   ax = 'x': los cortes son paralelos al ancho (separan franjas en x) */
+function partir(list, reg, ax, k, prof) {
+  if (prof > 14) throw new Error('El plano no se puede cortar en guillotina');
+  var oth = ax === 'y' ? 'x' : 'y';
+  var a0 = ax === 'y' ? reg.y0 : reg.x0, a1 = ax === 'y' ? reg.y1 : reg.x1;
+  var sg = segs(list, ax), parts = [], pos = a0, huecos = 0;
+  sg.forEach(function (s) {
+    if (s.s - pos > TOL) { parts.push({ tipo: 'descarte', size: Math.max(0, s.s - pos - k) }); huecos++; }
+    var sub = ax === 'y' ? { x0: reg.x0, x1: reg.x1, y0: s.s, y1: s.e } : { x0: s.s, x1: s.e, y0: reg.y0, y1: reg.y1 };
+    var hoja = null;
+    if (s.items.length === 1) {
+      var p = s.items[0];
+      var b0 = oth === 'x' ? p.x : p.y, b1 = oth === 'x' ? p.x + p.w : p.y + p.h;
+      var r0 = oth === 'x' ? sub.x0 : sub.y0, r1 = oth === 'x' ? sub.x1 : sub.y1;
+      if (Math.abs(b0 - r0) < TOL && Math.abs(b1 - r1) < TOL) hoja = p;
+    }
+    var child = hoja ? null : partir(s.items, sub, oth, k, prof + 1);
+    if (child) huecos += child.huecos;
+    parts.push({ tipo: hoja ? 'pieza' : 'parte', size: s.e - s.s, pieza: hoja, child: child, reg: sub });
+    pos = s.e + k;
+  });
+  var fin = sg.length ? sg[sg.length - 1].e : a0;
+  var resto = a1 - fin;                      // material que queda después de la última parte (incluye la sierra)
+  var sobrante = null;
+  if (resto > k + TOL) sobrante = { size: resto - k, reg: ax === 'y' ? { x0: reg.x0, x1: reg.x1, y0: fin + k, y1: a1 } : { x0: fin + k, x1: a1, y0: reg.y0, y1: reg.y1 } };
+  return { ax: ax, reg: reg, parts: parts, sobrante: sobrante, ultimaQueda: !sobrante, huecos: huecos };
+}
+
+/* Elige el sentido del primer corte: el mismo que usó el optimizador (cortes de fase 1);
+   si no hay, el que deja menos huecos (empate: a lo largo) */
+function primerEje(g, k, reg) {
+  var c1 = (g.cuts || []).filter(function (c) { return c.st === 1; })[0];
+  if (c1) return Math.abs(c1.y1 - c1.y2) < 1e-6 ? 'y' : 'x';
+  var best = null;
+  ['y', 'x'].forEach(function (ax) {
+    try { var t = partir(g.pieces, reg, ax, k, 0); var sc = t.huecos * 1000 + contar(t); if (!best || sc < best.sc) best = { sc: sc, ax: ax }; } catch (e) {}
+  });
+  return best ? best.ax : 'y';
+}
+function firma(t) {
+  return t.ax + '[' + t.parts.map(function (p) {
+    return p.tipo[0] + Math.round(p.size * 10) + (p.pieza ? 'i' + p.pieza.it.item : '') + (p.child ? firma(p.child) : '');
+  }).join(',') + '|' + (t.sobrante ? Math.round(t.sobrante.size * 10) : '') + ']';
+}
+function contar(t) { return t.parts.reduce(function (s, p) { return s + 1 + (p.child ? contar(p.child) : 0); }, 0); }
+
+/* g: grupo de placas del optimizador; R: resultado (cfg, pieces); o: {retazoMin} */
+function arbol(g, R) {
+  var cfg = R.cfg, k = cfg.kerf || 0;
+  var reg = { x0: cfg.refX, x1: cfg.refX + g.W, y0: cfg.refY, y1: cfg.refY + g.H };
+  var ax = primerEje(g, k, reg);
+  return partir(g.pieces, reg, ax, k, 0);
+}
+
+/* Pasos para la persona que corta */
+function pasos(g, R) {
+  var cfg = R.cfg, t = arbol(g, R), out = [], labels = new Map(), tiras = [];
+  var minRet = cfg.retazoMin || 100;
+  var dir = function (ax) { return ax === 'y' ? 'a lo largo' : 'a lo ancho'; };
+  var info = function (p) { var pc = R.pieces[p.it.item]; return { item: pc.row + 1, desc: pc.desc || '', largo: pc.largo, ancho: pc.ancho, girada: !!p.rotated }; };
+  var dims = function (r) { return { w: r.x1 - r.x0, h: r.y1 - r.y0 }; };
+  function walk(node, padre, nivel, emit) {
+    var push = function (x) { if (emit) out.push(x); };
+    var i = 0, ps = node.parts, lado = node.ax === 'y' ? node.reg.y1 - node.reg.y0 : node.reg.x1 - node.reg.x0;
+    for (var j = 0; j < ps.length; j++) {
+      var p = ps[j];
+      if (p.tipo === 'descarte') { push({ tipo: 'descarte', nivel: nivel, dir: dir(node.ax), size: p.size }); continue; }
+      var lbl = etiqueta(padre, i, nivel);
+      if (p.tipo === 'pieza') {
+        // agrupar piezas iguales seguidas
+        var n = 1, lbls = [lbl];
+        labels.set(p.pieza, lbl);
+        while (j + n < ps.length && ps[j + n].tipo === 'pieza' && Math.abs(ps[j + n].size - p.size) < 0.05 &&
+               ps[j + n].pieza.it.item === p.pieza.it.item) {
+          var l2 = etiqueta(padre, i + n, nivel); labels.set(ps[j + n].pieza, l2); lbls.push(l2); n++;
+        }
+        var esUltima = j + n === ps.length && node.ultimaQueda;
+        push({ tipo: 'pieza', nivel: nivel, lado: lado, label: lbls[0], hasta: n > 1 ? lbls[n - 1] : '', cant: n, dir: dir(node.ax), tope: p.size,
+          medida: dims(p.reg), pieza: info(p.pieza), queda: esUltima });
+        if (nivel === 1 && emit) tiras.push({ label: lbls[0], reg: p.reg, ax: node.ax, hasta: n > 1 ? lbls[n - 1] : '' });
+        i += n; j += n - 1;
+      } else {
+        // pedazos idénticos seguidos: se cortan igual, un solo paso "N veces"
+        var f = firma(p.child), m = 1;
+        while (j + m < ps.length && ps[j + m].tipo === 'parte' && Math.abs(ps[j + m].size - p.size) < 0.05 && firma(ps[j + m].child) === f) m++;
+        var hasta = m > 1 ? etiqueta(padre, i + m - 1, nivel) : '';
+        push({ tipo: 'parte', nivel: nivel, lado: lado, label: lbl, hasta: hasta, cant: m, dir: dir(node.ax), tope: p.size, medida: dims(p.reg),
+          queda: j + m === ps.length && node.ultimaQueda });
+        for (var q = 0; q < m; q++) {
+          if (nivel === 1 && emit) tiras.push({ label: etiqueta(padre, i + q, nivel), reg: ps[j + q].reg, ax: node.ax });
+          walk(ps[j + q].child, lbl, nivel + 1, emit && q === 0);   // los repetidos llevan las mismas etiquetas que el primero
+        }
+        i += m; j += m - 1;
+      }
+    }
+    if (node.sobrante) {
+      var d = dims(node.sobrante.reg);
+      push({ tipo: 'sobrante', nivel: nivel, medida: d, util: Math.min(d.w, d.h) >= minRet, reg: node.sobrante.reg });
+    }
+  }
+  walk(t, '', 1, true);
+  return { ax: t.ax, pasos: out, labels: labels, tiras: tiras, huecos: t.huecos };
+}
+
+/* Texto de un paso (lo usan la pantalla y el PDF) */
+function texto(s, fmt) {
+  fmt = fmt || n1;
+  var md = function (m) { return fmt(m.w) + ' × ' + fmt(m.h); };
+  if (s.tipo === 'pieza') {
+    var pz = s.pieza, nom = '#' + pz.item + ' ' + pz.desc + ' (' + fmt(pz.largo) + ' × ' + fmt(pz.ancho) + ')';
+    var lab = s.label + (s.hasta ? '–' + s.hasta : '');
+    var ini = s.nivel === 1 ? 'Tira ' + lab : lab;
+    return ini + ' · tope ' + fmt(s.tope) + ' sobre el lado de ' + fmt(s.lado) + (s.cant > 1 ? ' · ' + s.cant + ' veces' : '') + ' → ' + nom +
+      (s.queda ? (s.cant > 1 ? ' (la última es lo que queda)' : ' (es lo que queda)') : '');
+  }
+  if (s.tipo === 'parte') {
+    var rep = s.cant > 1;
+    return (s.nivel === 1 ? 'Tira ' : '') + s.label + (rep ? '–' + s.hasta : '') + ' · tope ' + fmt(s.tope) + ' sobre el lado de ' + fmt(s.lado) +
+      (rep ? ' · ' + s.cant + ' veces' : '') + ' → ' + (rep ? 'pedazos' : 'pedazo') + ' de ' + md(s.medida) +
+      (s.queda ? (rep ? ' (el último es lo que queda)' : ' (es lo que queda)') : '') + (rep ? '. Cortá cada uno así:' : '. Cortalo así:');
+  }
+  if (s.tipo === 'sobrante') return 'Sobra ' + md(s.medida) + (s.util ? ' → guardar como retazo' : ' → descarte');
+  if (s.tipo === 'descarte') return 'Cortar y descartar ' + fmt(s.size) + ' mm (' + s.dir + ')';
+  return '';
+}
+
+/* Encabezado de la placa: refilado, sentido del primer corte y repeticiones */
+function intro(g, R, H, fmt) {
+  fmt = fmt || n1;
+  var c = R.cfg, L = [];
+  if (g.cantidad > 1) L.push('Esta placa se repite ' + g.cantidad + ' veces' + ((c.apila || 1) > 1 ? ': se pueden cortar apiladas de a ' + c.apila + '.' : '. Cortalas igual, una por una.'));
+  L.push('Refilar ' + fmt(c.refY) + ' mm a lo largo' + (c.ref4 ? ' en los dos bordes' : '') + ' y ' + fmt(c.refX) + ' mm a lo ancho' + (c.ref4 ? ' en las dos puntas' : '') +
+    ' → queda ' + fmt(g.W) + ' × ' + fmt(g.H) + '.');
+  L.push('Primero tiras ' + (H.ax === 'y' ? 'a lo largo (cortes paralelos al lado de ' + fmt(g.placa.largo) + ')' : 'a lo ancho (cortes paralelos al lado de ' + fmt(g.placa.ancho) + ')') +
+    '. El tope es la medida de lo que se separa; la sierra (' + fmt(c.kerf) + ' mm) va del lado del resto.');
+  return L;
+}
+
+G.HojaCorte = { arbol: arbol, pasos: pasos, texto: texto, intro: intro, partir: partir };
+if (typeof module !== 'undefined') module.exports = G.HojaCorte;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 <script>/* Motor de etiquetas EMF (80x50 mm) estilo Lepton - Mueler */
@@ -906,7 +1080,8 @@ G.KDT = {kdtXML: kdtXML, leerKDT: leerKDT, gaps: function(){ var g = GAPS; GAPS 
     }
     out.push(cur); return out;
   }
-  const mm = v => { const m = String(v || '').replace(',', '.').match(/-?\d+(\.\d+)?/); return m ? parseFloat(m[0]) : 0; };
+  const mm = v => { let t = String(v || '').trim(); if (/^-?\d{1,3}(\.\d{3})+(,\d+)?(\s|$)/.test(t)) t = t.replace(/\./g, '');
+    const m = t.replace(',', '.').match(/-?\d+(\.\d+)?/); return m ? parseFloat(m[0]) : 0; };
   const nz = x => String(x || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
   // "1 (1 x 18)" -> {k:1, t:'1'} · "" -> {k:0} · "ABS 2mm (2 x 22)" -> {k:2, t:'ABS 2mm'}
   function edge(v) {
@@ -924,7 +1099,8 @@ G.KDT = {kdtXML: kdtXML, leerKDT: leerKDT, gaps: function(){ var g = GAPS; GAPS 
     text = String(text || '').replace(/^﻿/, '');
     const lines = text.split(/\r?\n/).filter(l => l.trim());
     if (!lines.length) throw new Error('El archivo está vacío.');
-    const sep = (lines[0].match(/;/g) || []).length >= (lines[0].match(/,/g) || []).length ? ';' : ',';
+    const cnt = ch => (lines[0].split(ch).length - 1);
+    const sep = cnt('\t') > Math.max(cnt(';'), cnt(',')) ? '\t' : cnt(';') >= cnt(',') ? ';' : ',';
     const head = splitLine(lines[0], sep).map(nz);
     const col = (...names) => { for (const n of names) { const i = head.indexOf(nz(n)); if (i >= 0) return i; } return -1; };
     const C = {
@@ -936,6 +1112,13 @@ G.KDT = {kdtXML: kdtXML, leerKDT: leerKDT, gaps: function(){ var g = GAPS; GAPS 
       b1: col('Longitud del borde 1', 'Edge length 1', 'L1'), b2: col('Longitud del borde 2', 'Edge length 2', 'L2'),
       b3: col('Ancho del borde 1', 'Edge width 1', 'A 1', 'A1'), b4: col('Ancho de borde 2', 'Ancho del borde 2', 'Edge width 2', 'A 2', 'A2'),
     };
+    // si OpenCutList cambió el nombre de la columna Tipo, se reconoce por el contenido
+    if (C.tipo < 0) {
+      const sample = lines.slice(1, 60).map(l => splitLine(l, sep));
+      let b = -1, bs = 0;
+      head.forEach((_, i) => { const v = sample.filter(r => /^(tablero|canto|accesorio|indefinido|sheet good|edge banding|hardware|solid wood|madera maciza)$/i.test(String(r[i] || '').trim())).length; if (v > bs) { bs = v; b = i; } });
+      if (b >= 0) { C.tipo = b; if (C.mat < 0) C.mat = b + 1; }
+    }
     if (C.cant < 0 || C.mat < 0 || (C.lc < 0 && C.lf < 0)) throw new Error('No parece un CSV de OpenCutList: faltan las columnas Cantidad, Material o Longitud.');
     const tableros = {}, orden = [], otros = {};
     for (let n = 1; n < lines.length; n++) {
@@ -1096,7 +1279,7 @@ const tapaByCode=c=>TAPAS().find(t=>t.code===c);
 const matByCode=c=>MATS().find(t=>t.code===c);
 const blank=()=>({cant:0,largo:0,ancho:0,desc:'',girar:true,cantos:{sup:0,inf:0,izq:0,der:0}});
 let S={id:null,proyecto:'',cliente:'',mat:BASE_MATS[0],t1:tapaByCode('T240'),t2:tapaByCode('T240'),rows:[],recortes:[],example:false,estado:'borrador'};
-let LAST=null,VIEW={placa:0,nums:true,cuts:false},DB=null,USER=null,DL=null,PROJS=[];
+let LAST=null,VIEW={placa:0,nums:true,cuts:false,pasos:true},DB=null,USER=null,DL=null,PROJS=[];
 function exampleState(){const r=(c,l,a,d,g,cs)=>({cant:c,largo:l,ancho:a,desc:d,girar:g,cantos:{sup:cs[0],inf:cs[1],izq:cs[2],der:cs[3]}});
   S={id:null,proyecto:'PRUEBA CLAUDE',cliente:'',mat:BASE_MATS[0],t1:tapaByCode('T240'),t2:tapaByCode('T240'),example:true,estado:'borrador',recortes:[],rows:[
    r(2,2400,550,'Lat alto',false,[1,0,0,0]),r(2,1164,550,'Lat bajo',true,[1,0,0,0]),r(6,570,520,'Estante',true,[1,0,0,0]),r(3,540,480,'Fondo',true,[0,0,0,0]),r(2,2396,598,'Puerta',false,[1,1,1,1])]};padRows()}
@@ -1138,7 +1321,7 @@ function renderRules(){const u=util();const r=[];
   r.push(`Canto: ${CFG.cantoMinUno?`con un canto, lados ≥ <b>${CFG.cantoMinUno} mm</b>; `:''}con 2 o más cantos, lados ≥ <b>${CFG.cantoMinMulti} mm</b>. Desperdicio <b>${CFG.despCanto} mm/lado</b>${CFG.despCantoPct?` + ${CFG.despCantoPct}%`:''}, redondeo ${CFG.redondeo==='arriba'?'hacia arriba':CFG.redondeo==='abajo'?'hacia abajo':'al más cercano'}.`);
   r.push(`Corte en <b>${CFG.fases} fases</b> · primer corte ${CFG.dir==='auto'?'automático (modo combinado)':CFG.dir==='H'?'a lo largo':'a lo ancho'}${CFG.apila>1?` · apila ${CFG.apila} placas`:''}${S.recortes.length?` · <b>${S.recortes.reduce((s,x)=>s+x.cant,0)} recortes de stock</b> se usan primero`:''}.`);
   $('rules').innerHTML='<span class="eyebrow">Reglas del taller</span>'+r.map(x=>`<span>${x}</span>`).join('')}
-function readRow(i){const r=S.rows[i];if(!r||!$('q'+i))return;r.cant=$('q'+i).value.trim();r.largo=$('l'+i).value.trim();r.ancho=$('a'+i).value.trim();r.desc=$('s'+i).value;r.girar=$('g'+i).checked}
+function readRow(i){const r=S.rows[i];if(!r||!$('q'+i))return;r.cant=$('q'+i).value.trim();r.largo=$('l'+i).value.trim();r.ancho=$('a'+i).value.trim();r.desc=$('s'+i).value;{const gv=$('g'+i).checked;if(gv!==r.girar)delete r.girarAuto;r.girar=gv}}
 function dirty(){S.example=false;$('ex-badge').hidden=true;save()}
 $('tbody').addEventListener('input',e=>{const tr=e.target.closest('tr');if(!tr)return;const i=+tr.dataset.i;readRow(i);tr.classList.toggle('zero',!(num(S.rows[i].cant)>0));
   if(i===S.rows.length-1&&num(S.rows[i].cant)>0){S.rows.push(Object.assign(blank(),{girar:!S.mat.veta}));const f=document.activeElement&&document.activeElement.id;renderRows();if(f){const el=$(f);if(el){el.focus();const v=el.value;el.setSelectionRange&&el.setSelectionRange(v.length,v.length)}}}dirty()});
@@ -1176,7 +1359,7 @@ function pickerDlg(kind){const list=kind==='mat'?MATS():TAPAS();let q='',page=0;
       <span class="s">SKU ${esc(x.code)} · ${kind==='mat'?`${x.largo} × ${x.ancho} × ${espTxt(x.esp)} mm · ${x.veta?'veta':'liso'}${CFG.mostrarPrecios&&CFG.precios.placa[x.code]?' · '+money(CFG.precios.placa[x.code]):''}`:`${x.ancho} × ${espTxt(x.esp)} mm`}</span></button>`).join(''):`<div class="note">Sin resultados para "${esc(q)}".</div>`};
   d.q('#pk-q').addEventListener('input',e=>{q=e.target.value;page=0;draw()});d.q('#pk-prev').onclick=()=>{page=Math.max(0,page-1);draw()};d.q('#pk-next').onclick=()=>{page++;draw()};
   d.q('#pk-grid').addEventListener('click',e=>{const b=e.target.closest('.mcard');if(!b)return;const x=list.find(y=>y.code===b.dataset.code);
-    if(kind==='mat'){S.mat=x;const t=tapaByCode(x.canto);if(t){S.t1=t;S.t2=t}S.rows.forEach(r=>{if(!(num(r.cant)>0))r.girar=!x.veta});toast(x.veta?'Material con veta: las filas nuevas vienen sin Girar':(t?'Tapacanto sugerido: '+t.desc:'Material elegido'))}
+    if(kind==='mat'){S.mat=x;const t=tapaByCode(x.canto);if(t){S.t1=t;S.t2=t}S.rows.forEach(r=>{if(!(num(r.cant)>0)||r.girarAuto)r.girar=!x.veta});toast(x.veta?'Material con veta: las filas nuevas vienen sin Girar':(t?'Tapacanto sugerido: '+t.desc:'Material elegido'))}
     else S[kind]=x;d.close();renderHead();renderRows();dirty()});
   const n=d.q('#pk-none');n&&(n.onclick=()=>{S.t2=null;d.close();renderHead();dirty()});draw()}
 $('c-mat').onclick=()=>pickerDlg('mat');$('c-t1').onclick=()=>pickerDlg('t1');$('c-t2').onclick=()=>{if(CFG.ocultarT2){toast('El tapacanto #2 está desactivado en ⚙ Taller');return}pickerDlg('t2')};
@@ -1219,13 +1402,19 @@ $('b-import').onclick=()=>{const d=modal(`${H('Importar piezas o proyecto')}
   <p class="note">Texto separado por tabuladores (o punto y coma), una pieza por línea:</p>
   <pre class="mono" style="margin:0;background:var(--panel2);padding:8px;border-radius:4px;overflow-x:auto">cant  largo  ancho  descripción  girar  canto_sup  canto_inf  canto_izq  canto_der</pre>
   <p class="note">Obligatorios: cant, largo y ancho (mm; decimales con punto o coma). Girar: 0 no rota, 1 rota. Cantos: 0 sin canto, 1 tapacanto #1, 2 tapacanto #2. Se saltean encabezados. También acepta un proyecto exportado (.json), propio o de Lepton/Dilegno.</p>
+  <p class="note"><b>CSV de OpenCutList:</b> elegilo o arrastralo tal cual sale de SketchUp (cualquiera de sus formatos). Se toman los tableros con sus medidas, cantos y designación.</p>
   <div class="row"><input type="file" id="im-f" accept=".txt,.tsv,.csv,.json" aria-label="Archivo a importar"><button class="btn sm" id="im-tpl">Cargar plantilla de ejemplo</button></div>
   <textarea id="im-t" rows="8" placeholder="…o pegá acá las filas copiadas de Excel" style="font-family:var(--f-mono);font-size:12px" aria-label="Texto a importar"></textarea>
   <label class="note"><input type="checkbox" id="im-rep" checked> Reemplazar la lista actual</label>
   <div class="row" style="justify-content:flex-end"><button class="btn" data-close>Cancelar</button><button class="btn primary" id="im-ok">Importar</button></div>`);
   d.q('#im-tpl').onclick=()=>{d.q('#im-t').value='cant\tlargo\tancho\tdescripcion\tgirar\tsup\tinf\tizq\tder\n2\t2400\t550\tLateral\t0\t1\t0\t0\t0\n6\t570\t520\tEstante\t1\t1\t0\t0\t0\n2\t2396\t598\tPuerta\t0\t1\t1\t1\t1'};
-  d.q('#im-f').onchange=e=>{const f=e.target.files[0];if(!f)return;const fr=new FileReader();fr.onload=()=>{d.q('#im-t').value=fr.result};fr.readAsText(f)};
+  let imNombre='';
+  const leerIm=f=>{const fr=new FileReader();fr.onload=()=>{const t=String(fr.result).replace(/^\uFEFF/,'');const R=esOCL(t);
+    if(R){d.close();importarOCL(R,f.name,!d.q('#im-rep').checked);return}imNombre=f.name;d.q('#im-t').value=t};fr.readAsText(f,'utf-8')};
+  d.q('#im-f').onchange=e=>{const f=e.target.files[0];if(f)leerIm(f)};
+  d.m.addEventListener('dragover',e=>e.preventDefault());d.m.addEventListener('drop',e=>{e.preventDefault();const f=e.dataTransfer.files&&e.dataTransfer.files[0];if(f)leerIm(f)});
   d.q('#im-ok').onclick=()=>{const txt=d.q('#im-t').value;let rows,skipped=[];
+    {const R=esOCL(txt);if(R){d.close();importarOCL(R,imNombre||'OpenCutList',!d.q('#im-rep').checked);return}}
     try{const j=JSON.parse(txt);if(j&&j.cortes){rows=j.cortes.filter(c=>c.cantidad>0).map(c=>({cant:c.cantidad,largo:c.base,ancho:c.altura,desc:c.descripcion||'',girar:!!c.rota,cantos:c.cantos||bits2cantos(c.tapacantos|0)}));
       if(j.proyecto)S.proyecto=j.proyecto;if(j.cliente)S.cliente=j.cliente;const m=j.placa&&matByCode(j.placa.codigo);if(m)S.mat=m;else if(j.placa&&j.placa.base)S.mat={code:j.placa.codigo||'IMP',desc:j.placa.descripcion||'Material importado',largo:j.placa.base,ancho:j.placa.altura,esp:j.placa.espesor||18,veta:!!j.placa.veta,canto:''};
       if(j.tapa_mel)S.t1=tapaByCode(j.tapa_mel.codigo)||{code:j.tapa_mel.codigo||'T?',desc:j.tapa_mel.descripcion,ancho:22,esp:j.tapa_mel.espesor||0.45};
@@ -1261,8 +1450,9 @@ $('b-export').onclick=()=>exportDlg();
 let OCLP=null;
 const xbuf=b=>b instanceof ArrayBuffer?b:b.buffer.slice(b.byteOffset,b.byteOffset+b.byteLength);
 const fsafe=s=>String(s||'').replace(/[\\/:*?"<>|]+/g,'-').replace(/\s+/g,' ').trim();
-function oclDlg(){
-  const d=modal(`${H('Pedido de corte desde OpenCutList')}
+function prepOCL(R,nombre){R.pedido=String(nombre||'').replace(/\.(csv|txt)$/i,'');R.sinCantos=false;R.tableros.forEach(T=>{T.nombre=T.material;T.rota=false});return R}
+function oclDlg(pre,agregar){
+  const d=modal(`${H(pre?'Importar CSV de OpenCutList':'Pedido de corte desde OpenCutList')}${pre?`<p class="alert" style="margin:0">El CSV tiene <b>${pre.tableros.length} tipos de placa</b>. El optimizador trabaja con una placa por vez: tocá <b>Cargar en el optimizador</b> en la que quieras optimizar. Desde acá también salen los archivos para Dilegno y la planilla A4.</p>`:''}
    <p class="note" style="margin:0">Elegí el CSV completo que exporta OpenCutList. Se toman solo los <b>Tableros</b>, separados por material: Dilegno carga un tipo de tablero por vez, así que sale un archivo por placa.</p>
    <label class="ocdrop" id="oc-drop" for="oc-f"><input type="file" id="oc-f" accept=".csv,.txt" hidden><b>Arrastrá acá el CSV de OpenCutList</b><span>o hacé clic para elegirlo</span><span class="note" id="oc-arch"></span></label>
    <div class="row" id="oc-proy-row" style="justify-content:space-between" hidden><span class="note" id="oc-proy-t"></span><button class="btn sm" id="oc-proy">Usar el proyecto abierto</button></div>
@@ -1297,7 +1487,7 @@ function oclDlg(){
     d.qa('[data-xl]').forEach(x=>x.onclick=()=>bajarDilegno([P.tableros[+x.dataset.xl]],true));
     d.q('#oc-todos').onclick=()=>bajarDilegno(P.tableros);
     d.q('#oc-imp').onclick=()=>bajarImprimir();
-    d.qa('[data-opt]').forEach(x=>x.onclick=()=>{d.close();cargarTablero(P.tableros[+x.dataset.opt])})};
+    d.qa('[data-opt]').forEach(x=>x.onclick=()=>{d.close();cargarTablero(P.tableros[+x.dataset.opt],agregar)})};
   const dz=d.q('#oc-drop');
   ['dragenter','dragover'].forEach(t=>dz.addEventListener(t,e=>{e.preventDefault();dz.classList.add('on')}));
   ['dragleave','drop'].forEach(t=>dz.addEventListener(t,e=>{e.preventDefault();dz.classList.remove('on')}));
@@ -1306,10 +1496,16 @@ function oclDlg(){
   d.q('#oc-f').onchange=e=>{const f=e.target.files[0];if(f)leer(f);e.target.value=''};
   function leer(f){if(!/\.(csv|txt)$/i.test(f.name)){toast('Tiene que ser el CSV que exporta OpenCutList');return}const fr=new FileReader();
     fr.onload=()=>{let R;try{R=PedidoOCL.parse(String(fr.result),f.name)}catch(er){toast(er.message||'No se pudo leer el CSV');return}
-      R.pedido=f.name.replace(/\.(csv|txt)$/i,'');R.sinCantos=false;R.tableros.forEach(T=>{T.nombre=T.material;T.rota=false});OCLP=R;draw()};
+      OCLP=prepOCL(R,f.name);draw()};
     fr.readAsText(f,'utf-8')}
-  if(hayProy()&&(S.id||S.ocl))OCLP=pedidoDesdeProyecto();
+  if(pre)OCLP=pre;else if(hayProy()&&(S.id||S.ocl))OCLP=pedidoDesdeProyecto();
   draw()}
+/* CSV de OpenCutList tal cual sale (desde Importar o arrastrado a la lista) */
+function esOCL(txt){try{const R=PedidoOCL.parse(txt,'');return R&&R.tableros.length?R:null}catch(e){return null}}
+function importarOCL(R,nombre,agregar){prepOCL(R,nombre);OCLP=R;
+  const otros=Object.entries(R.otros||{}).map(([k,v])=>`${v} filas de ${k}`).join(' · ');
+  if(R.tableros.length===1){cargarTablero(R.tableros[0],agregar);if(otros)setTimeout(()=>toast(`Se cargaron los tableros. No entran en el corte: ${otros}`),3400);return}
+  oclDlg(R,agregar)}
 /* copia liviana del pedido OCL para guardarla con el proyecto (tIdx = placa que se cargó en el optimizador) */
 function oclSnap(P,tIdx){return {pedido:P.pedido,archivo:P.archivo,sinCantos:!!P.sinCantos,otros:P.otros||{},tIdx,
   tableros:P.tableros.map(T=>({material:T.material,nombre:T.nombre,esp:T.esp,rota:!!T.rota,piezas:T.piezas,nPiezas:T.nPiezas,m2:T.m2,cantoM:T.cantoM}))}}
@@ -1330,10 +1526,11 @@ async function bajarImprimir(){
   const P=OCLP,hoy=new Date().toLocaleDateString('es-AR');
   const b=await PedidoOCL.excelImprimir(ExcelJS,P.tableros,{titulo:P.pedido,fecha:hoy});
   await offer(fsafe(`${P.pedido} - para imprimir`)+'.xlsx',xbuf(b))}
-function cargarTablero(T){
-  const rows=T.piezas.map(p=>({cant:p.cant,largo:p.largo,ancho:p.ancho,desc:String(p.des||'').slice(0,CFG.maxDesc||50),girar:!!T.rota||!!p.rota,
+function cargarTablero(T,agregar){
+  const rows=T.piezas.map(p=>({cant:p.cant,largo:p.largo,ancho:p.ancho,desc:String(p.des||'').slice(0,CFG.maxDesc||50),girar:T.rota?true:p.rota==null?!S.mat.veta:!!p.rota,girarAuto:!T.rota&&p.rota==null,
     cantos:{sup:p.cantos.l1.k,inf:p.cantos.l2.k,izq:p.cantos.a1.k,der:p.cantos.a2.k}}));
   const ocl=oclSnap(OCLP,OCLP.tableros.indexOf(T));
+  if(agregar&&S.rows.some(r=>num(r.cant)>0)&&!S.example){S.rows=S.rows.filter(r=>num(r.cant)>0).concat(rows);padRows();renderRows();save();show('editor');toast(`${rows.length} medidas de ${T.nombre||T.material} agregadas a la lista`);return}
   const go=()=>{S.rows=rows;S.ocl=ocl;S.proyecto=fsafe(OCLP.pedido+' '+(T.nombre||T.material)).replace(/[^0-9a-zA-Z _*ñÑáéíóúÁÉÍÓÚüÜ.,()\-]/g,'').slice(0,50);S.example=false;S.estado='borrador';S.id=null;padRows();renderHead();renderRows();save();show('editor');
     toast(`${rows.length} medidas de ${T.nombre||T.material} cargadas. Elegí la placa en Material y optimizá.`)};
   if(S.rows.some(r=>num(r.cant)>0)&&!S.example)confirmDlg('Reemplazar la lista','La lista de piezas actual se reemplaza por la de '+esc(T.nombre||T.material)+'. Si la querés conservar, guardala antes en Mis proyectos.','Reemplazar',go);else go()}
@@ -1353,13 +1550,15 @@ function exportDlg(){const can=true,hasR=!!LAST,pdfOk=hasR&&can&&!!window.jspdf;
   <button class="mcard" data-x="etq" ${pdfOk?'':'disabled'}><span class="t">Etiquetas (PDF)</span><span class="note">Una por pieza: cliente, material, medida, cantos y número de orden.</span></button>
   <button class="mcard" data-x="kdt" ${hasR&&can?'':'disabled'}><span class="t">Paquete para la KDT (XML + etiquetas)</span><span class="note">Lo mismo que deja Lepton en C:\\KDT: el XML de cortes para PreSize y una etiqueta .EMF por item para la Zebra.</span></button>
   <button class="mcard" data-x="emf" ${hasR&&can?'':'disabled'}><span class="t">Solo etiquetas KDT (.EMF)</span><span class="note">Una etiqueta de 80 × 50 mm por item, con el nombre que espera PreSize (1.emf, 2.emf…).</span></button>
+  <button class="mcard" data-x="hoja" ${pdfOk?'':'disabled'}><span class="t">Hoja de corte (PDF)</span><span class="note">Para la escuadradora: paso a paso por tiras, con la medida de tope y casillas para tachar.</span></button>
   <button class="mcard" data-x="maq" ${hasR?'':'disabled'}><span class="t">Secuencia para máquina (CSV)</span><span class="note">Cortes en orden por placa: fase, coordenadas y largo.</span></button>
   <button class="mcard" data-x="plan" ${hasR?'':'disabled'}><span class="t">Plan por pieza (CSV)</span><span class="note">Cada pieza con su placa, orden, posición y cantos.</span></button>
   <button class="mcard" data-x="pz"><span class="t">Lista de piezas (CSV)</span><span class="note">Se abre en Excel y se vuelve a importar.</span></button>
   <button class="mcard" data-x="json"><span class="t">Proyecto (JSON)</span><span class="note">Todo el proyecto, para abrirlo en otra computadora.</span></button></div>
   ${hasR?'':'<p class="note">Optimizá primero para exportar el plano, las etiquetas y la secuencia.</p>'}${can?'':'<p class="note">Esta vista no permite descargar archivos: te muestro el texto para copiar. Los PDF necesitan abrir la página en claude.ai.</p>'}`);
   d.q('.grid3').addEventListener('click',async e=>{const b=e.target.closest('.mcard');if(!b||b.disabled)return;const x=b.dataset.x;d.close();
-    try{if(x==='pdf'){await offer(fname('_plano.pdf'),pdfPlano(LAST).output('arraybuffer'))}
+    try{if(x==='hoja'){await bajarHoja(null)}
+    else if(x==='pdf'){await offer(fname('_plano.pdf'),pdfPlano(LAST).output('arraybuffer'))}
     else if(x==='etq'){await offer(fname('_etiquetas.pdf'),pdfEtiquetas(LAST).output('arraybuffer'))}
     else if(x==='kdt'||x==='emf'){const z=kdtZip(LAST,x==='kdt');if(z.avisos.length)toast('Atención: revisá el plano en PreSize antes de cortar');await offer(fname(x==='kdt'?'_KDT.zip':'_etiquetas_emf.zip'),z.data)}
     else{const map={maq:[fname('_maquina.csv'),()=>maquinaCSV(LAST)],plan:[fname('_plan.csv'),()=>planCSV(LAST)],pz:[fname('_piezas.csv'),piezasCSV],json:[fname('.json'),()=>JSON.stringify(projectJSON(),null,1)]}[x];
@@ -1530,6 +1729,9 @@ function boardSVG(g,R,opts={}){const Lb=g.placa.largo,Ab=g.placa.ancho,thumb=!!o
       if(p.h>120)s+=`<text transform="translate(${p.x+p.w-24},${p.y+p.h/2}) rotate(-90)" text-anchor="middle" font-size="${Math.min(30,p.w/4)}" font-family="IBM Plex Mono, monospace" fill="#1b211e">${fmt(p.h,p.h%1?1:0)}</text>`}
     else if(p.w>120&&p.h>90)s+=`<text x="${p.x+p.w/2}" y="${p.y+p.h/2+16}" text-anchor="middle" font-size="${Math.min(70,p.h/2.6,p.w/5)}" font-weight="800" fill="#1b211e">${pc.row+1}</text>`;
     s+=`</g>`});
+  if(opts.pasos&&!thumb){const h=opts.pasos;g.pieces.forEach(p=>{const l=h.labels.get(p);if(!l)return;const fs=Math.min(44,(p.h-16)/1.3,(p.w-16)/(l.length*0.7+0.6));if(fs<14)return;const bw=l.length*fs*0.7+fs*0.6;
+      s+=`<rect x="${p.x+p.w-8-bw}" y="${p.y+8}" width="${bw}" height="${fs*1.3}" rx="6" fill="#1b211e"/><text x="${p.x+p.w-8-bw/2}" y="${p.y+8+fs*1.02}" text-anchor="middle" font-size="${fs}" font-weight="800" fill="#fff">${l}</text>`});
+    h.tiras.forEach(t=>{const r=t.reg,lab=t.label+(t.hasta?'–'+t.hasta:'');s+=t.ax==='x'?`<text x="${(r.x0+r.x1)/2}" y="-6" text-anchor="middle" font-size="40" font-weight="800" fill="var(--ink)">${lab}</text>`:`<text x="-12" y="${(r.y0+r.y1)/2+14}" text-anchor="end" font-size="48" font-weight="800" fill="var(--ink)">${lab}</text>`})}
   if(opts.cuts)g.cuts.forEach((c,ci)=>{s+=`<line x1="${c.x1}" y1="${c.y1}" x2="${c.x2}" y2="${c.y2}" stroke="#c0392b" stroke-width="4" stroke-dasharray="${c.st===1?'0':c.st===2?'22 10':'8 8'}"/><circle cx="${(c.x1+c.x2)/2}" cy="${(c.y1+c.y2)/2}" r="26" fill="#c0392b"/><text x="${(c.x1+c.x2)/2}" y="${(c.y1+c.y2)/2+10}" text-anchor="middle" font-size="28" font-weight="700" fill="#fff">${ci+1}</text>`});
   const fs=thumb?70:44;const nR=R.cfg.ref4?2:1;
   s+=`<g stroke="var(--muted)" stroke-width="3"><line x1="0" x2="${Lb}" y1="${Ab+50}" y2="${Ab+50}"/><line x1="0" x2="0" y1="${Ab+30}" y2="${Ab+70}"/><line x1="${Lb}" x2="${Lb}" y1="${Ab+30}" y2="${Ab+70}"/>${thumb?'':`<line x1="${Lb+50}" x2="${Lb+50}" y1="0" y2="${Ab}"/><line x1="${Lb+30}" x2="${Lb+70}" y1="0" y2="0"/><line x1="${Lb+30}" x2="${Lb+70}" y1="${Ab}" y2="${Ab}"/>`}</g>
@@ -1557,7 +1759,7 @@ function renderResult(){const el=$('result');if(!LAST){el.innerHTML=`<div class=
   const pager=`<div class="pager"><button class="btn sm" data-pg="${Math.max(0,pg-1)}" aria-label="Anterior" ${pg===0?'disabled':''}>«</button><button class="btn sm" data-pg="0" aria-current="${pg===0}" title="Todas las placas" aria-label="Todas las placas">▦</button>${G.map((g,i)=>`<button class="btn sm" data-pg="${i+1}" aria-current="${pg===i+1}">${i+1}</button>`).join('')}<button class="btn sm" data-pg="${Math.min(G.length,pg+1)}" aria-label="Siguiente" ${pg===G.length?'disabled':''}>»</button></div>`;
   const head=`<div class="row" style="justify-content:space-between;align-items:end;gap:12px"><div style="min-width:0"><span class="eyebrow">Plan de corte · ${esc(R.snap.proyecto||'sin nombre')}${R.snap.cliente?' · '+esc(R.snap.cliente):''}</span>
    <h2>${R.nPlacas} de ${fmt(R.placa.largo)} x ${fmt(R.placa.ancho)}${R.nRecortes?` + ${R.nRecortes} recorte${R.nRecortes>1?'s':''}`:''} · ${esc(R.snap.mat.desc)}</h2></div>
-   <div class="row"><label class="note"><input type="checkbox" id="r-nums" ${VIEW.nums?'checked':''}> Números de orden</label><button class="btn sm" id="r-edit">Modificar medidas</button><button class="btn sm" id="r-save">Guardar</button><button class="btn sm" id="r-exp">Exportar</button><button class="btn sm primary" id="r-send">Enviar a producción</button></div></div>`;
+   <div class="row"><label class="note"><input type="checkbox" id="r-nums" ${VIEW.nums?'checked':''}> Números de orden</label><button class="btn sm" id="r-edit">Modificar medidas</button><button class="btn sm" id="r-save">Guardar</button><button class="btn sm" id="r-hoja">Hoja de corte</button><button class="btn sm" id="r-exp">Exportar</button><button class="btn sm primary" id="r-send">Enviar a producción</button></div></div>`;
   const legend=`<div class="legend"><span><i style="background:var(--t1)"></i>Tapacanto #1</span><span><i style="background:repeating-linear-gradient(90deg,var(--t2) 0 6px,transparent 6px 9px)"></i>Tapacanto #2</span><span><i style="background:var(--rest-line)"></i>Sobrante (s1, s2…)</span><span>(n) orden de corte · ↻ girada · medidas en mm</span></div>`;
   let main;
   if(!single){main=`<div class="tiles"><div class="tile"><span class="k">Placas</span><span class="v">${R.nPlacas}</span><span class="note">${R.fraccion?'última: '+R.fraccion.nombre:fmt(R.m2Total,2)+' m²'}</span></div>
@@ -1569,7 +1771,8 @@ function renderResult(){const el=$('result');if(!LAST){el.innerHTML=`<div class=
      <p class="note">${R.nPiezas} piezas · ${R.estrategia.primerCorte} · ${R.cfg.fases} fases · calculado en ${fmt(R.ms,0)} ms. Tocá una placa para verla en detalle.</p>`}
   else{const st=groupStats(single);const agg={};single.pieces.forEach(p=>{agg[p.it.item]=(agg[p.it.item]||0)+1});const tn=v=>v===1?'#1':v===2?'#2':'';
     main=`<article class="boardcard"><div class="row" style="justify-content:space-between"><h2>${single.cantidad} de ${single.placa.recorte?'recorte ':''}${fmt(single.placa.largo)} x ${fmt(single.placa.ancho)}</h2><span class="note">${single.pieces.length} piezas · aprovechamiento ${fmt(st.aprov*100,2)} % · ${single.cuts.length} cortes</span></div>
-     ${legend}<label class="note"><input type="checkbox" id="r-cuts" ${VIEW.cuts?'checked':''}> Mostrar la secuencia de cortes sobre el plano</label><div class="svgbox">${boardSVG(single,R,{cuts:VIEW.cuts})}</div>
+     ${legend}<div class="row"><label class="note"><input type="checkbox" id="r-pasos" ${VIEW.pasos?'checked':''}> Pasos de la hoja de corte (A, A1, A1a…)</label><label class="note"><input type="checkbox" id="r-cuts" ${VIEW.cuts?'checked':''}> Mostrar la secuencia de cortes sobre el plano</label></div><div class="svgbox">${boardSVG(single,R,{cuts:VIEW.cuts,pasos:VIEW.pasos?hojaDe(single,R):null})}</div>
+     <details class="hojabox" open><summary><b>Hoja de corte</b><span class="note">paso a paso para la escuadradora · tachá cada corte a medida que lo hacés</span><button class="btn sm" id="r-hoja1" type="button">Imprimir esta placa</button></summary>${hojaHTML(single,R)}</details>
      <h3>Piezas ubicadas</h3><div style="overflow-x:auto"><table class="mini"><thead><tr><th>Ref.</th><th>Cant.</th><th>Base</th><th>Altura</th><th>Arr</th><th>Aba</th><th>Izq</th><th>Der</th><th>Detalle</th></tr></thead><tbody>
      ${Object.keys(agg).map(k=>{const pc=R.pieces[k];return `<tr><td class="n">${pc.row+1}</td><td class="n">${agg[k]*single.cantidad}</td><td class="n">${fmt(pc.largo)}</td><td class="n">${fmt(pc.ancho)}</td><td>${tn(pc.cantos.sup)}</td><td>${tn(pc.cantos.inf)}</td><td>${tn(pc.cantos.izq)}</td><td>${tn(pc.cantos.der)}</td><td>${esc(pc.desc)}</td></tr>`}).join('')}</tbody></table></div>
      <details><summary class="note" style="cursor:pointer">Secuencia de cortes (${single.cuts.length})</summary><table class="mini"><thead><tr><th>#</th><th>Fase</th><th>Desde</th><th>Hasta</th><th>Largo</th></tr></thead><tbody>
@@ -1578,6 +1781,8 @@ function renderResult(){const el=$('result');if(!LAST){el.innerHTML=`<div class=
    <div class="resgrid"><div style="display:grid;gap:14px;min-width:0">${main}</div><aside class="side">${sidePanels(R,single?[single]:G,!!single)}</aside></div>`;
   el.querySelectorAll('[data-pg]').forEach(b=>b.onclick=()=>{VIEW.placa=+b.dataset.pg;renderResult();window.scrollTo(0,0)});
   $('r-nums').onchange=e=>{VIEW.nums=e.target.checked;renderResult()};const rc=$('r-cuts');if(rc)rc.onchange=e=>{VIEW.cuts=e.target.checked;renderResult()};
+  const rp=$('r-pasos');if(rp)rp.onchange=e=>{VIEW.pasos=e.target.checked;renderResult()};
+  $('r-hoja').onclick=()=>bajarHoja(single?[single]:null);const rh1=$('r-hoja1');if(rh1)rh1.onclick=e=>{e.preventDefault();bajarHoja([single])};
   $('r-edit').onclick=()=>show('editor');$('r-save').onclick=async()=>{await saveProject();toast('Proyecto guardado')};$('r-exp').onclick=exportDlg;$('r-send').onclick=sendDlg}
 
 function pedidoTexto(R,env){const t=CFG.taller,b=budget(R),tap=R.tapacanto;const L=[];
@@ -1603,6 +1808,39 @@ function sendDlg(){if(!LAST)return;const t=CFG.taller;const resp=(t.responsables
   d.q('#sd-ok').onclick=async()=>{S.cliente=d.q('#sd-c').value;LAST.snap.cliente=S.cliente;const env={responsable:d.q('#sd-r').value,notas:d.q('#sd-n').value,fecha:Date.now()};S.envio=env;
     await saveProject('enviado');d.close();renderResult();copyBox('Orden enviada a producción',pedidoTexto(LAST,env),'Quedó guardada como Enviada. Copiá este resumen para mandarlo por WhatsApp o mail.')}}
 
+/* ---- Hoja de corte para la escuadradora (paso a paso por tiras) ---- */
+const HOJAS=new WeakMap();
+function hojaDe(g,R){if(HOJAS.has(g))return HOJAS.get(g);let h=null;try{h=HojaCorte.pasos(g,R)}catch(e){console.error(e)}HOJAS.set(g,h);return h}
+function hojaHTML(g,R){const h=hojaDe(g,R);if(!h)return '<p class="note">No se pudo armar la hoja de corte de esta placa.</p>';
+  return `<ul class="hojal">${HojaCorte.intro(g,R,h).map(l=>`<li class="hi">${esc(l)}</li>`).join('')}${h.pasos.map(s=>`<li class="t-${s.tipo}" style="margin-left:${(s.nivel-1)*22}px"><label><input type="checkbox"><span>${esc(HojaCorte.texto(s))}</span></label></li>`).join('')}</ul>`}
+function pdfHoja(R,lista){const {jsPDF}=window.jspdf;const doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'});const t=CFG.taller;const PW=210,PH=297,M=10;let first=true;
+  const G=lista||R.groups,tx=v=>String(v).replace(/→/g,'»');
+  const hdr=title=>{doc.setTextColor(20);doc.setFont('helvetica','bold');doc.setFontSize(12);doc.text(t.nombre||'Taller',M,M+2);doc.setFont('helvetica','normal');doc.setFontSize(8.5);
+    doc.text(`${R.snap.proyecto||'Proyecto sin nombre'}${R.snap.cliente?' · '+R.snap.cliente:''} · ${new Date().toLocaleDateString('es-AR')}`,M,M+7);doc.text(`${R.snap.mat.desc} · ${espTxt(R.snap.mat.esp)} mm · HOJA DE CORTE`,M,M+11);
+    doc.setFont('helvetica','bold');doc.setFontSize(11);doc.text(title,PW-M,M+2,{align:'right'});doc.setFont('helvetica','normal');doc.setDrawColor(180);doc.setLineWidth(0.2);doc.line(M,M+13,PW-M,M+13)};
+  const rgb=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+  G.forEach(g=>{const h=hojaDe(g,R);if(!first)doc.addPage();first=false;const tit=`Placa ${g.n} de ${R.groups.length} · ${g.cantidad} de ${g.placa.recorte?'recorte ':''}${g.placa.largo} x ${g.placa.ancho}`;hdr(tit);
+    const ox=M+10,oy=M+22,sc=Math.min((PW-2*M-12)/g.placa.largo,100/g.placa.ancho);
+    doc.setDrawColor(30);doc.setLineWidth(0.4);doc.rect(ox,oy,g.placa.largo*sc,g.placa.ancho*sc);
+    g.rests.forEach(r=>{doc.setFillColor(232,234,229);doc.setDrawColor(170);doc.setLineWidth(0.1);doc.rect(ox+r.x*sc,oy+r.y*sc,r.w*sc,r.h*sc,'FD')});
+    g.pieces.forEach(p=>{const pc=R.pieces[p.it.item];const [cr,cg,cb]=rgb(PAL[pc.row%PAL.length]);doc.setFillColor(cr,cg,cb);doc.setDrawColor(30);doc.setLineWidth(0.25);
+      const x=ox+p.x*sc,y=oy+p.y*sc,w=p.w*sc,hh=p.h*sc;doc.rect(x,y,w,hh,'FD');const l=h&&h.labels.get(p);doc.setTextColor(20);
+      if(l){const fs=Math.min(11,hh*1.6,w*2.6/Math.max(1,l.length));if(fs>=4){doc.setFont('helvetica','bold');doc.setFontSize(fs);doc.text(l,x+w/2,y+hh/2+(hh>9?-0.5:fs*0.17),{align:'center'})}}
+      if(hh>9&&w>10){doc.setFont('helvetica','normal');doc.setFontSize(Math.min(7,hh/2.5));doc.text(`#${pc.row+1} ${pc.desc.slice(0,14)}`,x+w/2,y+hh/2+3.4,{align:'center'})}});
+    if(h)h.tiras.forEach(tt=>{const r=tt.reg,lab=tt.label+(tt.hasta?'-'+tt.hasta:'');doc.setFont('helvetica','bold');doc.setFontSize(11);doc.setTextColor(20);
+      if(tt.ax==='x')doc.text(lab,ox+(r.x0+r.x1)/2*sc,oy-1.6,{align:'center'});else doc.text(lab,ox-1.6,oy+(r.y0+r.y1)/2*sc+1.5,{align:'right'})});
+    let y=oy+g.placa.ancho*sc+8;const nueva=()=>{doc.addPage();hdr(`Placa ${g.n} (sigue)`);y=M+22};
+    if(!h){doc.setFontSize(10);doc.text('No se pudo armar la hoja de corte de esta placa.',M,y);return}
+    doc.setFont('helvetica','normal');doc.setFontSize(9);doc.setTextColor(70);
+    HojaCorte.intro(g,R,h).forEach(l=>{doc.splitTextToSize(tx(l),PW-2*M).forEach(ln=>{if(y>PH-14)nueva();doc.text(ln,M,y);y+=4.2})});y+=2;
+    h.pasos.forEach(st=>{const x=M+(st.nivel-1)*7,tw=PW-M-(x+6.5);const gris=st.tipo==='sobrante'||st.tipo==='descarte';
+      doc.setFont('helvetica',st.tipo==='parte'?'bold':'normal');doc.setFontSize(10);const ls=doc.splitTextToSize(tx(HojaCorte.texto(st)),tw);
+      if(y+ls.length*4.6>PH-12)nueva();doc.setDrawColor(gris?150:40);doc.setLineWidth(0.3);doc.rect(x,y-3.3,3.6,3.6);doc.setTextColor(gris?110:20);
+      ls.forEach((ln,i)=>doc.text(ln,x+6.5,y+i*4.6));y+=ls.length*4.6+1.4})});
+  const n=doc.getNumberOfPages();for(let i=1;i<=n;i++){doc.setPage(i);doc.setFontSize(7);doc.setTextColor(120);doc.text(`${t.nombre} · Optimizador Mueler · hoja de corte · página ${i} de ${n}`,PW/2,PH-5,{align:'center'})}
+  return doc}
+async function bajarHoja(lista){if(!LAST)return;if(!window.jspdf){toast('No se pudo cargar el generador de PDF. Recargá la página.');return}
+  try{await offer(fname(lista&&lista.length===1?`_hoja_de_corte_placa${lista[0].n}.pdf`:'_hoja_de_corte.pdf'),pdfHoja(LAST,lista).output('arraybuffer'))}catch(e){console.error(e);toast('No se pudo generar la hoja de corte')}}
 function pdfPlano(R){const {jsPDF}=window.jspdf;const doc=new jsPDF({orientation:'landscape',unit:'mm',format:'a4'});const t=CFG.taller;const PW=297,PH=210,M=10;let first=true;
   const hdr=title=>{doc.setTextColor(20);doc.setFont('helvetica','bold');doc.setFontSize(12);doc.text(t.nombre||'Taller',M,M+2);doc.setFont('helvetica','normal');doc.setFontSize(8.5);
     doc.text(`${S.proyecto||'Proyecto sin nombre'}${S.cliente?' · Cliente: '+S.cliente:''} · ${new Date().toLocaleDateString('es-AR')}`,M,M+7);doc.text(`${R.snap.mat.desc} (${R.snap.mat.code}) · ${R.placa.largo} x ${R.placa.ancho} x ${espTxt(R.snap.mat.esp)} mm`,M,M+11);
