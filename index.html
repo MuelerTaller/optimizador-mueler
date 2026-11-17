@@ -1233,6 +1233,7 @@ G.KDT = {kdtXML: kdtXML, leerKDT: leerKDT, gaps: function(){ var g = GAPS; GAPS 
   if (typeof module !== 'undefined') module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
+<script>/* Dentro del Sistema Mueler: usa la base y las descargas del Sistema */try{if(window.parent&&window.parent!==window&&window.parent.__optiClaude)window.claude=window.parent.__optiClaude;}catch(e){}</script>
 <script>
 (function(){
 'use strict';
@@ -1257,6 +1258,28 @@ const BASE_MATS=[
  ['P153','Guillermina Nova 18mm',3660,1830,18,0,''],['P217','Fenolico Pino 18mm 244 x 122 II/III C+C',2440,1220,18,1,''],
  ['P573','Multilam. Guatambu 12mm 210x160',2100,1600,12,1,''],['P592','APA OSB Estructural 18,3mm',2440,1220,18.3,1,''],
  ['P228','Placa propiedad del cliente',2750,1830,18,1,''],
+ ['SC01','Enchapado MDF 18mm Paraiso',2600,1830,18,1,''],['SC02','Enchapado MDF 18mm Petiribi',2600,1830,18,1,''],['SC03','Enchapado MDF 18mm Kiri',2600,1830,18,1,''],['SC04','Enchapado MDF 18mm Incienso',2600,1830,18,1,''],
+ ['SC05','Fibrofacil MDF 3mm',2750,1830,3,0,''],['SC06','Fibrofacil MDF 5.5mm',2750,1830,5.5,0,''],['SC07','Fibrofacil MDF 9mm',2750,1830,9,0,''],['SC08','Fibrofacil MDF 12mm',2750,1830,12,0,''],['SC09','Fibrofacil MDF 15mm',2750,1830,15,0,''],['SC10','Fibrofacil MDF 25mm',2750,1830,25,0,''],['SC11','Fibrofacil MDF 30mm',2750,1830,30,0,''],
+ ['SC12','Fibroplus Faplac MDF 5.5mm 137 BLANCO TUNDRA',2750,1830,5.5,0,'T240'],
+ ['SC13','Fibroplus Faplac MDF 5.5mm 135 BLANCO NATURE',2750,1830,5.5,1,'T72'],
+ ['SC14','Fibroplus Faplac MDF 5.5mm 135 LINO BLANCO',2750,1830,5.5,0,'T62'],
+ ['SC15','Fibroplus Faplac MDF 5.5mm 105-CENIZA',2750,1830,5.5,0,'T13'],
+ ['SC16','Fibroplus Faplac MDF 5.5mm 108-GRIS HUMO',2750,1830,5.5,0,'T22'],
+ ['SC17','Fibroplus Faplac MDF 5.5mm 303 NEGRO PROFUNDO',2750,1830,5.5,0,'T23'],
+ ['SC18','Fibroplus Faplac MDF 5.5mm 031-ROBLE DAKAR',2750,1830,5.5,1,'T32'],
+ ['SC19','Fibroplus Faplac MDF 5.5mm 089-HELSINKI',2750,1830,5.5,1,'T64'],
+ ['SC20','Fibroplus Faplac MDF 5.5mm 096 OLMO FINLANDES',2750,1830,5.5,1,'T55'],
+ ['SC21','Fibroplus Faplac MDF 5.5mm 040-ROJO',2750,1830,5.5,0,'T268'],
+ ['SC22','Fibroplus Trupan MDF 5.5mm 135- BLANCO',2750,1830,5.5,0,'T240'],
+ ['SC23','Fibroplus Trupan MDF 5.5mm 105-CENIZA',2750,1830,5.5,0,'T13'],
+ ['SC24','Fibroplus Trupan MDF 5.5mm 107-GRAFITO',2750,1830,5.5,0,'T21'],
+ ['SC25','Fibroplus Trupan MDF 5.5mm 089-HELSINKI',2750,1830,5.5,1,'T64'],
+ ['SC26','Fibroplus Trupan MDF 5.5mm 099-TEKA OSLO',2750,1830,5.5,1,'T57'],
+ ['SC27','Fibroplus Trupan MDF 5.5mm 065 CAJU',2750,1830,5.5,1,'T70'],
+ ['SC28','Fibroplus Egger MDF 5.5mm Blanco W954 ST14',2600,1830,5.5,0,'T240'],
+ ['SC29','Fibroplus Egger MDF 5.5mm Negro U999 ST9',2600,1830,5.5,0,'T97'],
+ ['SC30','Fibroplus Egger MDF 5.5mm R. Kendal Nat. H3170 ST12',2600,1830,5.5,1,'T100'],
+ ['SC31','Fibroplus Egger MDF 5.5mm Gris Perla U763 ST9',2600,1830,5.5,0,'T93'],
 ].map(a=>({code:a[0],desc:a[1],largo:a[2],ancho:a[3],esp:a[4],veta:!!a[5],canto:a[6]}));
 const BASE_TAPAS=[
  ['T240','Blanco 22x0.45 Rehau',22,0.45],['T0B2','Blanco 22x2',22,2],['T62','Lino Blanco 22x0.45',22,0.45],['T118','Lino Blanco 22x2 F422 ST10',22,2],
@@ -1905,6 +1928,12 @@ const draft=LS.get('mueler_draft2',null);
 if(draft&&draft.rows&&draft.rows.some(r=>num(r.cant)>0)){S=Object.assign({recortes:[],estado:'borrador',cliente:''},draft);S.mat=matByCode(S.mat.code)||S.mat;padRows()}else exampleState();
 renderHead();renderRows();runOptimize(true);
 const h=(location.hash||'').slice(1);show(['editor','result','doc'].includes(h)?h:'editor');
+/* El Sistema Mueler abre módulos acá (Proyectos → Optimizador) */
+window.__muelerLoad=function(j){try{const rows=(j.cortes||[]).filter(c=>c.cantidad>0).map(c=>({cant:c.cantidad,largo:c.base,ancho:c.altura,desc:c.descripcion||'',girar:!!c.rota,cantos:c.cantos||bits2cantos(c.tapacantos|0)}));
+  S=Object.assign({},S,{id:null,ocl:null,estado:'borrador',example:false,proyecto:j.proyecto||'',cliente:j.cliente||'',recortes:Array.isArray(j.recortes)?j.recortes:[],rows});
+  const m=j.placa&&((j.placa.codigo&&matByCode(j.placa.codigo))||MATS().find(x=>x.desc===j.placa.descripcion));S.mat=m||{code:(j.placa&&j.placa.codigo)||'IMP',desc:(j.placa&&j.placa.descripcion)||'Material importado',largo:(j.placa&&j.placa.base)||2750,ancho:(j.placa&&j.placa.altura)||1830,esp:(j.placa&&j.placa.espesor)||18,veta:!!(j.placa&&j.placa.veta),canto:''};
+  if(m&&m.canto){const t=tapaByCode(m.canto);if(t){S.t1=t;S.t2=t}}
+  padRows();renderHead();renderRows();save();runOptimize(false);return true}catch(e){console.error(e);return false}};
 window.__app={get S(){return S},get LAST(){return LAST},pdfPlano,pdfEtiquetas,planCSV,maquinaCSV,pedidoTexto,budget,kdtZip,kdtXMLtxt,kdtItems,kdtCfg};
 /* ---- Versión web: base compartida del taller en Google Sheets (Apps Script) ---- */
 const WEB_BACKEND='https://script.google.com/macros/s/AKfycbw13EMfIL0tCWyUmBBMkFq2x_N0cSHlZRmWGgN0OEVFVZbs_in15Drk2N57thvd6q8m0Q/exec';
